@@ -2,7 +2,7 @@
 //! unavailable ones are greyed using the same enablement as the main menus. Items marked as menu
 //! invocations (`Value::Null` params) go through `menus::invoke`, so dialogs open like in the menu bar.
 
-use photocraft_doc::{Layer, LayerContent};
+use photocraft_doc::{LabelColor, Layer, LayerContent};
 use serde_json::{Value, json};
 
 /// One entry: label, command id. `None` = separator.
@@ -76,6 +76,38 @@ pub fn entries(l: &Layer, multi: bool, has_selection: bool) -> Vec<Entry> {
     v
 }
 
+/// `layer.setColorLabel` params for a colour: the clicked layer, or (`on_set`) every selected layer.
+pub fn label_params(l: &Layer, on_set: bool, c: LabelColor) -> Value {
+    if on_set { json!({"color": c.name()}) } else { json!({"layer": l.id.0, "color": c.name()}) }
+}
+
+/// Photoshop's colour label items (No Color, Red … Gray), each with its swatch. Returns the
+/// command params of the one clicked.
+fn label_items(ui: &mut egui::Ui, l: &Layer, on_set: bool) -> Option<Value> {
+    let t = crate::theme::Tokens::get(ui.ctx());
+    let mut picked = None;
+    for c in LabelColor::ALL {
+        let swatch = egui::Id::new(("label-swatch", c.name()));
+        let r = egui::Button::new((egui::Atom::custom(swatch, egui::vec2(12.0, 12.0)), tl!(c.label()))).atom_ui(ui);
+        if let Some(rect) = r.rect(swatch) {
+            let p = ui.painter();
+            match t.label_color(c) {
+                Some(fill) => {
+                    p.rect_filled(rect, 2.0, fill);
+                }
+                None => {
+                    p.line_segment([rect.left_bottom(), rect.right_top()], egui::Stroke::new(1.0, t.text_faint));
+                }
+            }
+            p.rect_stroke(rect, 2.0, egui::Stroke::new(1.0, t.field_border), egui::StrokeKind::Inside);
+        }
+        if r.response.clicked() {
+            picked = Some(label_params(l, on_set, c));
+        }
+    }
+    picked
+}
+
 /// Render the menu. Pushes `(command, params)` actions; `Value::Null` params mean "invoke like the
 /// menu item" (opens the command's dialog when it has one).
 pub fn show(app: &crate::PhotocraftApp, ui: &mut egui::Ui, l: &Layer, on_set: bool, actions: &mut Vec<(String, Value)>) -> bool {
@@ -112,6 +144,14 @@ pub fn show(app: &crate::PhotocraftApp, ui: &mut egui::Ui, l: &Layer, on_set: bo
         }
     }
     ui.separator();
+    if let Some(p) = label_items(ui, l, on_set) {
+        if !on_set {
+            actions.push(("layer.select".into(), json!({"layer": l.id.0})));
+        }
+        actions.push((photocraft_engine::layer_label_cmds::ID.into(), p));
+        ui.close();
+    }
+    ui.separator();
     if ui.button(tl!("Rename Layer…")).clicked() {
         rename = true;
         ui.close();
@@ -122,6 +162,7 @@ pub fn show(app: &crate::PhotocraftApp, ui: &mut egui::Ui, l: &Layer, on_set: bo
 #[cfg(test)]
 mod tests {
     use super::*;
+    use photocraft_doc::LayerId;
 
     #[test]
     fn smart_object_context_menu_edits_the_clicked_layer() {
@@ -168,6 +209,64 @@ mod tests {
             h.state_mut().session.set_active(0);
             assert_eq!(h.state().session.active().unwrap().active_layer, Some(photocraft_doc::LayerId(smart)));
         }
+    }
+
+    #[test]
+    fn context_menu_colour_labels_the_clicked_layer_and_the_filter_shows_it() {
+        use crate::PhotocraftApp;
+        use egui::{Event, Modifiers, PointerButton, Pos2, pos2, vec2};
+        use egui_kittest::{Harness, kittest::Queryable};
+
+        fn click(h: &mut Harness<'_, PhotocraftApp>, at: Pos2, button: PointerButton) {
+            h.hover_at(at);
+            h.step();
+            for pressed in [true, false] {
+                h.event(Event::PointerButton { pos: at, button, pressed, modifiers: Modifiers::NONE });
+                h.step();
+            }
+            h.run_steps(3);
+        }
+
+        let mut s = photocraft_engine::Session::new();
+        s.execute("file.new", json!({"width": 64, "height": 48})).unwrap();
+        let target = s.execute("layer.new.layer", json!({"name": "Label me"})).unwrap()["layer"].as_u64().unwrap();
+        let other = s.execute("layer.new.layer", json!({"name": "Active one"})).unwrap()["layer"].as_u64().unwrap();
+        let mut h = Harness::builder().with_size(vec2(1440.0, 900.0)).with_step_dt(1.0 / 60.0).with_max_steps(64).build_eframe(move |cc| {
+            PhotocraftApp::setup_context(&cc.egui_ctx, Default::default());
+            PhotocraftApp::new(s, crate::Services::default())
+        });
+        let ctx = h.ctx.clone();
+        let (req, _rx) = crate::control::ControlRequest::new("ui.set", json!({"dock": {"collapsed": ["color", "properties", "history", "navigator"]}}));
+        crate::control::handle(h.state_mut(), &ctx, &req);
+        h.run_steps(8);
+        let row = crate::layer_row_ui::recorded(&h.ctx).into_iter().find(|r| r.layer == target).expect("layer row drawn").row;
+        let at = pos2(row.left() + 6.0 + 28.0 + 12.0, row.center().y);
+        click(&mut h, at, PointerButton::Secondary);
+        // "Red" is also a channel name: take the menu item, the one nearest the click.
+        let red = h.query_all_by_label("Red").map(|n| n.rect().center()).min_by(|a, b| a.distance(at).total_cmp(&b.distance(at))).expect("Red menu item");
+        click(&mut h, red, PointerButton::Primary);
+        let st = h.state().session.active().unwrap();
+        assert_eq!(st.doc.layer(LayerId(target)).unwrap().label, LabelColor::Red);
+        assert_eq!(st.doc.layer(LayerId(other)).unwrap().label, LabelColor::None);
+        assert_eq!(st.active_layer, Some(LayerId(target)), "the clicked row becomes the active layer");
+
+        // Filter by colour: only the red layer is listed.
+        h.state_mut().ui.layer_filter_by = crate::state::LayerFilterBy::Color;
+        h.state_mut().ui.layer_filter_color = LabelColor::Red;
+        h.run_steps(4);
+        let shown: Vec<u64> = crate::layer_row_ui::recorded(&h.ctx).iter().map(|r| r.layer).collect();
+        assert_eq!(shown, [target]);
+        h.state_mut().ui.layer_filter_color = LabelColor::None;
+        h.run_steps(4);
+        let shown: Vec<u64> = crate::layer_row_ui::recorded(&h.ctx).iter().map(|r| r.layer).collect();
+        assert!(shown.contains(&other) && !shown.contains(&target));
+    }
+
+    #[test]
+    fn label_params_target_the_row_or_the_selection() {
+        let l = Layer::raster("A", photocraft_color::PixelFormat::RGBA8);
+        assert_eq!(label_params(&l, false, LabelColor::Blue), json!({"layer": l.id.0, "color": "blue"}));
+        assert_eq!(label_params(&l, true, LabelColor::None), json!({"color": "none"}));
     }
 
     #[test]

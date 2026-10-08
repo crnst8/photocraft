@@ -317,6 +317,26 @@ impl Tokens {
     pub fn dark(&self) -> bool {
         matches!(self.kind, ThemeKind::Studio | ThemeKind::Pro | ThemeKind::ProMedium)
     }
+
+    /// Fill of a layer colour label (the Layers panel's eye column), or `None` for No Color.
+    pub fn label_color(&self, c: photocraft_doc::LabelColor) -> Option<Color32> {
+        use photocraft_doc::LabelColor as L;
+        let dark = self.dark();
+        let rgb = |d: [u8; 3], l: [u8; 3]| {
+            let v = if dark { d } else { l };
+            Color32::from_rgb(v[0], v[1], v[2])
+        };
+        Some(match c {
+            L::None => return None,
+            L::Red => rgb([124, 52, 52], [238, 166, 166]),
+            L::Orange => rgb([132, 82, 40], [244, 196, 146]),
+            L::Yellow => rgb([124, 112, 44], [240, 228, 146]),
+            L::Green => rgb([58, 102, 58], [174, 218, 168]),
+            L::Blue => rgb([46, 84, 124], [164, 198, 234]),
+            L::Violet => rgb([92, 66, 122], [204, 178, 230]),
+            L::Gray => rgb([98, 98, 98], [198, 198, 198]),
+        })
+    }
 }
 
 /// Register Inter (UI) and JetBrains Mono (numbers) plus named weights.

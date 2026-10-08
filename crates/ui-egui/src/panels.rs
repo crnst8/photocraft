@@ -2,10 +2,10 @@
 
 use egui::{Align2, Color32, CornerRadius, Rect, RichText, Sense, Stroke, StrokeKind, Vec2, pos2, vec2};
 use photocraft_color::BlendMode;
-use photocraft_doc::{Layer, LayerContent, LayerId};
+use photocraft_doc::{LabelColor, Layer, LayerContent, LayerId};
 use serde_json::{Value, json};
 
-use crate::state::Tool;
+use crate::state::{LayerFilterBy, Tool};
 use crate::theme::{self, Tokens};
 use crate::{PhotocraftApp, icons, widgets};
 
@@ -1341,12 +1341,24 @@ fn layers(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     if t.pro {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
-            let (r, _) = ui.allocate_exact_size(vec2(64.0, 22.0), Sense::hover());
-            ui.painter().rect_filled(r, t.radius_sm, t.field);
-            ui.painter().rect_stroke(r, t.radius_sm, Stroke::new(1.0, t.field_border), StrokeKind::Inside);
-            icons::paint(ui, Rect::from_center_size(r.left_center() + vec2(11.0, 0.0), vec2(14.0, 14.0)), "search", 11.0, t.text_faint);
-            ui.painter().text(r.left_center() + vec2(22.0, 0.0), Align2::LEFT_CENTER, tl!("Kind"), egui::FontId::proportional(11.5), t.text_dim);
+            let mut by = app.ui.layer_filter_by;
+            if widgets::dropdown(ui, "layer-filter-by", &mut by, &[(LayerFilterBy::Kind, "Kind"), (LayerFilterBy::Color, "Color")], 64.0) {
+                app.ui.layer_filter_by = by;
+            }
             ui.add_space(4.0);
+            if by == LayerFilterBy::Color {
+                let mut c = app.ui.layer_filter_color;
+                let opts: Vec<(LabelColor, &str)> = LabelColor::ALL.iter().map(|c| (*c, c.label())).collect();
+                if widgets::dropdown(ui, "layer-filter-color", &mut c, &opts, 96.0) {
+                    app.ui.layer_filter_color = c;
+                }
+                if let Some(fill) = t.label_color(c) {
+                    let (r, _) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::hover());
+                    ui.painter().rect_filled(r, 2.0, fill);
+                    ui.painter().rect_stroke(r, 2.0, Stroke::new(1.0, t.field_border), StrokeKind::Inside);
+                }
+                return;
+            }
             for (kind, icon, tip) in [
                 ("pixel", "image", tl!("Filter for pixel layers")),
                 ("adjustment", "contrast", tl!("Filter for adjustment layers")),
@@ -1437,7 +1449,9 @@ fn layers(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     }
 
     // Top of the stack first, groups above their contents, closed groups' contents hidden (#126).
-    let rows = crate::layer_tree_ui::display_rows(&doc, !app.ui.layer_filter.is_empty());
+    let by_color = app.ui.layer_filter_by == LayerFilterBy::Color;
+    let rows = crate::layer_tree_ui::display_rows(&doc, by_color || !app.ui.layer_filter.is_empty());
+    let labels = crate::layer_tree_ui::shown_labels(&doc);
     let ctx = ui.ctx().clone();
     let footer = 38.0;
     let fill = ui.available_height() > footer + 60.0;
@@ -1448,12 +1462,17 @@ fn layers(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
         .min_scrolled_height(if fill { rows_h } else { 0.0 })
         .auto_shrink([false, !fill])
         .show(ui, |ui| {
-            let filter = app.ui.layer_filter.clone();
+            let filter = if by_color { Vec::new() } else { app.ui.layer_filter.clone() };
+            let color_filter = by_color.then_some(app.ui.layer_filter_color);
             let fx_collapsed = app.session.active().map(|d| d.fx_collapsed.clone()).unwrap_or_default();
             crate::layer_row_ui::begin(ui.ctx());
             for &(depth, l) in &rows {
                 // Select › Isolate Layers.
                 if !photocraft_engine::select_extra_cmds::isolation_shows(&doc, &isolated, l.id) {
+                    continue;
+                }
+                let label = labels.get(&l.id).copied().unwrap_or_default();
+                if color_filter.is_some_and(|c| c != label) {
                     continue;
                 }
                 if !filter.is_empty() {
@@ -1469,7 +1488,7 @@ fn layers(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                         continue;
                     }
                 }
-                let row = RowSel { selected: selection.contains(&l.id), primary: active == Some(l.id), multi: selection.len() > 1 };
+                let row = RowSel { selected: selection.contains(&l.id), primary: active == Some(l.id), multi: selection.len() > 1, label };
                 let top = ui.cursor().top();
                 layer_row(app, &ctx, ui, &doc, l, depth, row, &mut actions);
                 if reveal == Some(l.id) {
@@ -1606,6 +1625,8 @@ struct RowSel {
     selected: bool,
     primary: bool,
     multi: bool,
+    /// Colour label the row shows (its own or its group's).
+    label: LabelColor,
 }
 
 /// `layer.select` mode for a click with these modifiers (Photoshop: ⌘-click toggles, ⇧-click
@@ -1692,6 +1713,10 @@ fn layer_row(
         } else if resp.hovered() {
             painter.rect_filled(rect, 0.0, t.hover.gamma_multiply(0.5));
         }
+        // Colour label: Photoshop fills the eye column.
+        if let Some(fill) = t.label_color(row.label) {
+            painter.rect_filled(Rect::from_min_max(rect.left_top(), pos2(rect.left() + 30.0, rect.bottom())), 0.0, fill);
+        }
         // eye column divider + row divider, as in Photoshop
         painter.line_segment([pos2(rect.left() + 30.0, rect.top()), pos2(rect.left() + 30.0, rect.bottom())], Stroke::new(1.0, t.separator));
         painter.line_segment([rect.left_bottom(), rect.right_bottom()], Stroke::new(1.0, t.separator));
@@ -1700,6 +1725,11 @@ fn layer_row(
         painter.rect_stroke(rect, t.radius, Stroke::new(1.0, t.field_border), StrokeKind::Inside);
     } else if resp.hovered() {
         painter.rect_filled(rect, t.radius, t.hover.gamma_multiply(0.5));
+    }
+    if !t.pro
+        && let Some(fill) = t.label_color(row.label)
+    {
+        painter.rect_filled(Rect::from_min_size(rect.left_top() + vec2(1.0, 4.0), vec2(3.0, rect.height() - 8.0)), 1.5, fill);
     }
     let mut x = rect.left() + 6.0;
     let eye = Rect::from_min_size(pos2(x, rect.center().y - 11.0), vec2(22.0, 22.0));
@@ -1858,9 +1888,14 @@ fn layer_row(
     resp.context_menu(|ui| {
         // Right-clicking inside a multi-selection keeps it and acts on every selected layer.
         let on_set = row.multi && selected;
-        if crate::layer_menu_ui::show(app, ui, l, on_set, actions)
-            && let Some(done) = crate::layer_row_ui::start_rename(ui.ctx(), l.id.0, &l.name)
-        {
+        // The full menu (with the colour labels) is taller than a short window: scroll it there.
+        let max_h = (ui.ctx().content_rect().height() - 16.0).max(120.0);
+        let rename = egui::ScrollArea::vertical()
+            .max_height(max_h)
+            .min_scrolled_height(max_h)
+            .show(ui, |ui| crate::layer_menu_ui::show(app, ui, l, on_set, actions))
+            .inner;
+        if rename && let Some(done) = crate::layer_row_ui::start_rename(ui.ctx(), l.id.0, &l.name) {
             actions.push(done);
         }
     });

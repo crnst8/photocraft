@@ -3,6 +3,15 @@
 
 use serde::{Deserialize, Serialize};
 
+/// What the Layers panel filters by (Photoshop's filter type menu).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum LayerFilterBy {
+    #[default]
+    Kind,
+    Color,
+}
+
 /// Shared selection and capture for a point curve; document parameters remain with the host.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -745,6 +754,12 @@ pub struct UiState {
     /// Layers panel kind filter ("pixel", "adjustment", "type", "shape", "smart"); empty = all.
     #[serde(default)]
     pub layer_filter: Vec<String>,
+    /// Layers panel filter type: by kind (`layer_filter`) or by colour label (`layer_filter_color`).
+    #[serde(default)]
+    pub layer_filter_by: LayerFilterBy,
+    /// Layers panel colour filter: the label shown while `layer_filter_by` is `color`.
+    #[serde(default)]
+    pub layer_filter_color: photocraft_doc::LabelColor,
     /// Actions panel: which row is selected and which are expanded. The list lives on the session.
     #[serde(default)]
     pub actions: crate::actions::ActionsUi,
@@ -862,6 +877,8 @@ impl Default for UiState {
             slices: Default::default(),
             shell: Default::default(),
             layer_filter: Vec::new(),
+            layer_filter_by: LayerFilterBy::Kind,
+            layer_filter_color: photocraft_doc::LabelColor::None,
             pen: None,
             selected_path: None,
             panels: Panels::default(),

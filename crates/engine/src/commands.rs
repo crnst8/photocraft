@@ -1043,6 +1043,7 @@ fn build() -> Vec<CommandSpec> {
     v.extend(crate::variables_cmds::specs());
     v.extend(crate::plugin_cmds::specs());
     v.extend(crate::group_view_cmds::specs());
+    v.extend(crate::layer_label_cmds::specs());
     v.extend(crate::fx_view_cmds::specs());
     v.extend(crate::mask_view_cmds::specs());
     v.extend(crate::actions_cmds::specs());

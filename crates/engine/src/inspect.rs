@@ -78,6 +78,7 @@ fn layer_sel(l: &Layer, selected: &[photocraft_doc::LayerId]) -> Value {
         "fill": l.fill_opacity,
         "blend": l.blend.label(),
         "clipped": l.clipped,
+        "color": l.label.name(),
         "hasMask": l.mask.is_some(),
         "bounds": bounds,
         "selected": selected.contains(&l.id),

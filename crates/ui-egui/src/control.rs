@@ -8,7 +8,7 @@
 //! - `engine.commands`: list commands with enablement
 //! - `ui.inspect`: full UI state (tool, panels, views, dialogs, windows, window size); the menu
 //!   tree is `ui.menu.list`
-//! - `ui.set {tool?, panels?, dock?, dockTabs?, dockWidth?, colorPanel?, maskTarget?, vectorMaskTarget?, selectionMode?, zoom?, center?, fit?, theme?, brushSection?, brushTab?, brushesView?, brushSize?}`:
+//! - `ui.set {tool?, panels?, dock?, dockTabs?, dockWidth?, colorPanel?, maskTarget?, vectorMaskTarget?, selectionMode?, zoom?, center?, fit?, theme?, brushSection?, brushTab?, brushesView?, brushSize?, layerFilter?}`:
 //!   change UI state; any other field is an error ([`UI_SET_FIELDS`])
 //! - `ui.menu.invoke {id, wait?}` / `ui.menu.list`: activate a menu item by id; list the menu tree
 //! - `ui.dialog.open {kind, fields?}` (kinds: newDocument, about, layerStyle {effect?}, colorPicker {target: foreground|background}, command {command}) / `ui.dialog.set {dialog, field, value}` / `ui.dialog.confirm {dialog, wait?}` / `ui.dialog.cancel {dialog}`
@@ -70,7 +70,7 @@ pub enum Outcome {
 
 /// The fields `ui.set` reads. Anything else is rejected before a field is applied, so a typo or
 /// a field the method doesn't have can't reply with success while nothing changes (#412).
-pub const UI_SET_FIELDS: [&str; 19] = [
+pub const UI_SET_FIELDS: [&str; 20] = [
     "tool",
     "panels",
     "dock",
@@ -90,7 +90,53 @@ pub const UI_SET_FIELDS: [&str; 19] = [
     "brushSize",
     "gradientBlendMode",
     "gradientClassic",
+    "layerFilter",
 ];
+
+/// Layers panel filter kinds `ui.set {layerFilter: {kinds}}` accepts.
+const LAYER_FILTER_KINDS: [&str; 5] = ["pixel", "adjustment", "type", "shape", "smart"];
+
+/// Parsed `ui.set {layerFilter: {by?, kinds?, color?}}`: each part, when given.
+type LayerFilterSet = (Option<crate::state::LayerFilterBy>, Option<Vec<String>>, Option<photocraft_doc::LabelColor>);
+
+fn layer_filter_param(v: &Value) -> Result<LayerFilterSet, String> {
+    let o = v.as_object().ok_or("layerFilter must be an object {by?, kinds?, color?}")?;
+    if let Some(k) = o.keys().find(|k| !matches!(k.as_str(), "by" | "kinds" | "color")) {
+        return Err(format!("unknown layerFilter field `{k}` (fields: by, kinds, color)"));
+    }
+    let by = match o.get("by") {
+        None => None,
+        Some(b) => Some(match b.as_str() {
+            Some("kind") => crate::state::LayerFilterBy::Kind,
+            Some("color") => crate::state::LayerFilterBy::Color,
+            _ => return Err("layerFilter.by must be `kind` or `color`".into()),
+        }),
+    };
+    let kinds = match o.get("kinds") {
+        None => None,
+        Some(k) => {
+            let list = k.as_array().ok_or("layerFilter.kinds must be an array")?;
+            let mut out = Vec::new();
+            for k in list {
+                match k.as_str().filter(|k| LAYER_FILTER_KINDS.contains(k)) {
+                    Some(k) if !out.iter().any(|o| o == k) => out.push(k.to_string()),
+                    Some(_) => {}
+                    None => return Err(format!("layerFilter.kinds: unknown kind {k} (kinds: {})", LAYER_FILTER_KINDS.join(", "))),
+                }
+            }
+            Some(out)
+        }
+    };
+    let color = match o.get("color") {
+        None => None,
+        Some(c) => Some(
+            c.as_str()
+                .and_then(photocraft_doc::LabelColor::from_name)
+                .ok_or_else(|| format!("layerFilter.color: unknown colour {c} (none, red, orange, yellow, green, blue, violet, gray)"))?,
+        ),
+    };
+    Ok((by, kinds, color))
+}
 
 fn ok(v: Value) -> Outcome {
     Outcome::Done(json!({"ok": true, "result": v}))
@@ -226,6 +272,10 @@ fn dispatch(app: &mut PhotocraftApp, ctx: &egui::Context, req: &ControlRequest) 
             {
                 return err("gradientClassic must be a boolean");
             }
+            let layer_filter = match p.get("layerFilter").map(layer_filter_param).transpose() {
+                Ok(f) => f,
+                Err(e) => return err(e),
+            };
             if let Some(t) = s("tool") {
                 match Tool::from_name(t) {
                     Some(t) => app.ui.tool = t,
@@ -253,6 +303,11 @@ fn dispatch(app: &mut PhotocraftApp, ctx: &egui::Context, req: &ControlRequest) 
                     Ok(v) => app.ui.panels = v,
                     Err(e) => return err(e),
                 }
+            }
+            if let Some((by, kinds, color)) = layer_filter {
+                app.ui.layer_filter_by = by.unwrap_or(app.ui.layer_filter_by);
+                app.ui.layer_filter = kinds.unwrap_or_else(|| app.ui.layer_filter.clone());
+                app.ui.layer_filter_color = color.unwrap_or(app.ui.layer_filter_color);
             }
             if let Some(m) = p.get("maskTarget").and_then(Value::as_bool) {
                 app.ui.mask_target = m;
@@ -788,6 +843,36 @@ mod tests {
         let bad = call(&mut app, &ctx, "ui.set", json!({"gradientBlendMode": "nonsense", "gradientClassic": false}));
         assert_eq!(bad["ok"], false, "{bad}");
         assert!(app.ui.tool_options.gradient_classic, "invalid mode must not change options");
+    }
+
+    #[test]
+    fn ui_set_layer_filter_validates_then_sets_kind_and_colour() {
+        use crate::state::LayerFilterBy;
+        use photocraft_doc::LabelColor;
+        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
+        let ctx = egui::Context::default();
+        let r = call(&mut app, &ctx, "ui.set", json!({"layerFilter": {"by": "color", "color": "Green"}}));
+        assert_eq!(r["ok"], true, "{r}");
+        assert_eq!((app.ui.layer_filter_by, app.ui.layer_filter_color), (LayerFilterBy::Color, LabelColor::Green));
+        let r = call(&mut app, &ctx, "ui.set", json!({"layerFilter": {"by": "kind", "kinds": ["type", "pixel", "type"]}}));
+        assert_eq!(r["ok"], true, "{r}");
+        assert_eq!(app.ui.layer_filter_by, LayerFilterBy::Kind);
+        assert_eq!(app.ui.layer_filter, ["type", "pixel"]);
+        assert_eq!(app.ui.layer_filter_color, LabelColor::Green, "fields left out keep their value");
+        for bad in [
+            json!({"layerFilter": {"by": "name"}}),
+            json!({"layerFilter": {"color": "magenta"}}),
+            json!({"layerFilter": {"kinds": ["group"]}}),
+            json!({"layerFilter": {"kinds": "pixel"}}),
+            json!({"layerFilter": {"colour": "red"}}),
+            json!({"layerFilter": "color"}),
+            json!({"tool": "move", "layerFilter": {"by": "color", "color": 7}}),
+        ] {
+            let r = call(&mut app, &ctx, "ui.set", bad.clone());
+            assert_eq!(r["ok"], false, "{bad}: {r}");
+        }
+        assert_eq!(app.ui.layer_filter_by, LayerFilterBy::Kind, "a rejected call changes nothing");
+        assert_eq!(app.ui.tool, Tool::Brush);
     }
 
     #[test]

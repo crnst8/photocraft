@@ -139,3 +139,22 @@ fn state_survives_psd_export_and_import_and_imported_groups_toggle() {
     click(&mut h, p, Modifiers::NONE);
     assert!(!group(&h, "outer").1);
 }
+
+#[test]
+fn group_labels_colour_unlabelled_contents() {
+    use photocraft_doc::LabelColor;
+    let mut s = photocraft_engine::Session::new();
+    s.execute("file.new", json!({"width": 8, "height": 8})).unwrap();
+    let plain = s.execute("layer.new.layer", json!({"name": "plain"})).unwrap()["layer"].as_u64().unwrap();
+    let own = s.execute("layer.new.layer", json!({"name": "own"})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("layer.select", json!({"layer": plain})).unwrap();
+    s.execute("layer.select", json!({"layer": own, "mode": "toggle"})).unwrap();
+    let group = s.execute("layer.groupLayers", json!({"name": "g"})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("layer.setColorLabel", json!({"layer": own, "color": "blue"})).unwrap();
+    s.execute("layer.setColorLabel", json!({"layer": group, "color": "orange"})).unwrap();
+    let labels = super::shown_labels(&s.active().unwrap().doc);
+    assert_eq!(labels[&LayerId(group)], LabelColor::Orange);
+    assert_eq!(labels[&LayerId(plain)], LabelColor::Orange, "inherits the group's label");
+    assert_eq!(labels[&LayerId(own)], LabelColor::Blue, "its own label wins");
+    assert_eq!(labels[&s.active().unwrap().doc.layers[0].id], LabelColor::None);
+}

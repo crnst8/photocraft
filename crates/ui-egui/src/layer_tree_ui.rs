@@ -6,8 +6,10 @@
 //! `.pcraft` and as the PSD section divider's open/closed folder type, toggled through
 //! `layer.setExpanded` (a view change: no history step).
 
+use std::collections::HashMap;
+
 use egui::{Rect, Sense, Shape, Stroke, pos2, vec2};
-use photocraft_doc::{Document, Layer, LayerContent};
+use photocraft_doc::{Document, LabelColor, Layer, LayerContent, LayerId};
 use serde_json::{Value, json};
 
 use crate::theme::Tokens;
@@ -31,6 +33,23 @@ pub fn display_rows(doc: &Document, show_all: bool) -> Vec<(usize, &Layer)> {
     }
     let mut out = Vec::new();
     rec(&doc.layers, 0, show_all, &mut out);
+    out
+}
+
+/// The colour label each layer shows: its own, or (No Color) the nearest labelled group around
+/// it, as Photoshop colours a group's contents with the group's label.
+pub fn shown_labels(doc: &Document) -> HashMap<LayerId, LabelColor> {
+    fn rec(layers: &[Layer], inherited: LabelColor, out: &mut HashMap<LayerId, LabelColor>) {
+        for l in layers {
+            let c = if l.label == LabelColor::None { inherited } else { l.label };
+            out.insert(l.id, c);
+            if let LayerContent::Group(g) = &l.content {
+                rec(&g.children, c, out);
+            }
+        }
+    }
+    let mut out = HashMap::new();
+    rec(&doc.layers, LabelColor::None, &mut out);
     out
 }
 
